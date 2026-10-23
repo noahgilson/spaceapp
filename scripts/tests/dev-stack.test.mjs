@@ -25,7 +25,9 @@ import {
   readPinnedOpenCodePackageSpec,
   renderDevStackCompose,
   resetDevStack,
+  isRecordedDevStackProcess,
   superviseChildProcesses,
+  terminateRecordedProcesses,
   writeCliWrapperScripts
 } from "../dev-stack.mjs";
 
@@ -255,4 +257,126 @@ test("superviseChildProcesses stops sibling services and reports failure when a 
   assert.equal(failure.code, 2);
   assert.match(stderrText, /service "worker" exited unexpectedly \(exit code 2\)/);
   assert.equal(fakeChildren.get("api.js").signalCode, "SIGTERM");
+});
+
+test("terminateRecordedProcesses verifies process identity and skips unrelated PIDs", async () => {
+  const scratchDir = mkdtempSync(path.join(os.tmpdir(), "spaceapp-pids-test-"));
+  try {
+    const pidsPath = path.join(scratchDir, "pids.json");
+    writeFileSync(
+      pidsPath,
+      JSON.stringify({
+        supervisorPid: 42001,
+        repoRoot: defaultRepoRoot,
+        stateDir: scratchDir,
+        children: {
+          "cli-host": 42002,
+          unrelated: 42003
+        }
+      }),
+      "utf8"
+    );
+
+    const alive = new Set([42001, 42002, 42003]);
+    const signaled = [];
+    const commands = new Map([
+      [42001, `node ${path.join(defaultRepoRoot, "scripts", "dev-stack.mjs")}`],
+      [42002, `node ${path.join(defaultRepoRoot, "packages", "cli-host", "dist", "main.js")}`],
+      [42003, "/usr/sbin/sshd -D"]
+    ]);
+
+    assert.equal(
+      isRecordedDevStackProcess(42001, {
+        repoRoot: defaultRepoRoot,
+        stateDir: scratchDir,
+        inspectCommand: (pid) => commands.get(pid) ?? ""
+      }),
+      true
+    );
+    assert.equal(
+      isRecordedDevStackProcess(42003, {
+        repoRoot: defaultRepoRoot,
+        stateDir: scratchDir,
+        inspectCommand: (pid) => commands.get(pid) ?? ""
+      }),
+      false
+    );
+
+    await terminateRecordedProcesses(scratchDir, {
+      repoRoot: defaultRepoRoot,
+      inspectCommand: (pid) => commands.get(pid) ?? "",
+      checkAlive: (pid) => alive.has(pid),
+      sendSignal: (pid, sig) => {
+        signaled.push({ pid, sig });
+        alive.delete(pid);
+      }
+    });
+
+    assert.deepEqual(signaled, [
+      { pid: 42001, sig: "SIGTERM" },
+      { pid: 42002, sig: "SIGTERM" }
+    ]);
+    assert.equal(alive.has(42003), true);
+    assert.equal(existsSync(pidsPath), false);
+  } finally {
+    rmSync(scratchDir, { recursive: true, force: true });
+  }
+});
+
+test("superviseChildProcesses restarts restartOnPackageRebuild services after incremental tsc rebuild", async () => {
+  const spawned = [];
+  const fakeSpawn = (_cmd, args, _opts) => {
+    const proc = new EventEmitter();
+    proc.stdout = new PassThrough();
+    proc.stderr = new PassThrough();
+    proc.exitCode = null;
+    proc.signalCode = null;
+    proc.pid = 20000 + spawned.length + 1;
+    proc.kill = (signal = "SIGTERM") => {
+      proc.signalCode = signal;
+      proc.emit("exit", null, signal);
+    };
+    spawned.push({ arg0: args[0], proc });
+    return proc;
+  };
+
+  const specs = [
+    { name: "packages", command: "npx", args: ["tsc"], cwd: defaultRepoRoot, env: {} },
+    {
+      name: "worker",
+      command: "node",
+      args: ["worker.js"],
+      cwd: defaultRepoRoot,
+      env: {},
+      restartOnPackageRebuild: true
+    }
+  ];
+
+  const stdout = new PassThrough();
+  const stderr = new PassThrough();
+  let updatedPids = null;
+
+  const supervisor = superviseChildProcesses(specs, {
+    spawnProcess: fakeSpawn,
+    stdout,
+    stderr,
+    onPidsChanged: (pids) => {
+      updatedPids = pids;
+    }
+  });
+
+  const pkgProc = spawned[0].proc;
+  // First watch completion is initial build -> should not restart worker yet
+  pkgProc.stdout.write("Found 0 errors. Watching for file changes.\n");
+  assert.equal(spawned.length, 2);
+
+  // Second watch completion is an incremental rebuild -> should restart worker cleanly
+  pkgProc.stdout.write("Found 0 errors. Watching for file changes.\n");
+  await new Promise((resolve) => setTimeout(resolve, 50));
+
+  assert.equal(spawned.length, 3);
+  assert.equal(spawned[2].arg0, "worker.js");
+  assert.equal(updatedPids?.worker, spawned[2].proc.pid);
+
+  await supervisor.stopAll();
 });

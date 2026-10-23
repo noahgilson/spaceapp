@@ -4,6 +4,12 @@ import { retainOpenTabAssets } from "./vite.asset-retention.js";
 import react from "@vitejs/plugin-react";
 import { demoBundleBoundaryPlugin } from "./vite.demo-boundary.js";
 
+/**
+ * Maps a Rollup module identifier to its manual vendor chunk name when applicable.
+ *
+ * @param moduleId - Absolute or virtual module identifier passed by Rollup.
+ * @returns The vendor chunk name, or `undefined` to let Rollup decide.
+ */
 export function manualChunkForModule(moduleId: string): string | undefined {
   const normalizedId = moduleId.replaceAll("\\", "/");
   if (
@@ -17,6 +23,12 @@ export function manualChunkForModule(moduleId: string): string | undefined {
   return undefined;
 }
 
+/**
+ * Resolves the upstream API origin used by the Vite dev server proxy.
+ *
+ * @param env - Process environment variables to inspect.
+ * @returns Normalized HTTP origin for the SpaceApp API server.
+ */
 export function resolveViteApiOrigin(env: NodeJS.ProcessEnv = process.env): string {
   const explicit = env.SPACE_API_ORIGIN?.trim();
   if (explicit) return explicit.replace(/\/+$/, "");

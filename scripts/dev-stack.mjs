@@ -52,6 +52,9 @@ const protectedRepoEntries = new Set([
   "node_modules"
 ]);
 
+/**
+ * Parses and validates an unprivileged TCP port number.
+ */
 function parsePort(value, flagName, fallback) {
   if (value === undefined || value === null || String(value).trim() === "") {
     return fallback;
@@ -63,6 +66,9 @@ function parsePort(value, flagName, fallback) {
   return parsed;
 }
 
+/**
+ * Validates that a candidate state directory path is safe to create and reset.
+ */
 export function assertSafeStateDir(stateDir, repoRoot = defaultRepoRoot) {
   if (typeof stateDir !== "string" || !stateDir.trim()) {
     throw new Error("State directory path must be a non-empty string.");
@@ -102,6 +108,9 @@ export function assertSafeStateDir(stateDir, repoRoot = defaultRepoRoot) {
   return resolvedStateDir;
 }
 
+/**
+ * Parses CLI arguments and environment variables into a dev-stack configuration.
+ */
 export function parseDevStackArgs(argv = [], env = process.env, repoRoot = defaultRepoRoot) {
   const args = [...argv];
   let command = "up";
@@ -215,6 +224,9 @@ export function parseDevStackArgs(argv = [], env = process.env, repoRoot = defau
   };
 }
 
+/**
+ * Extracts digest-pinned PostgreSQL and Temporal images from compose.yml.
+ */
 export function readPinnedComposeImages(composeTemplateText) {
   if (typeof composeTemplateText !== "string" || !composeTemplateText.trim()) {
     throw new Error("packages/run-spaceapp/templates/compose.yml content is empty.");
@@ -241,6 +253,9 @@ export function readPinnedComposeImages(composeTemplateText) {
   };
 }
 
+/**
+ * Extracts the pinned @opencode/cli package specifier from Dockerfile.
+ */
 export function readPinnedOpenCodePackageSpec(dockerfileText) {
   if (typeof dockerfileText !== "string" || !dockerfileText.trim()) {
     throw new Error("Dockerfile content is empty.");
@@ -252,10 +267,16 @@ export function readPinnedOpenCodePackageSpec(dockerfileText) {
   return match[1];
 }
 
+/**
+ * Normalizes a host path to forward slashes for Docker Compose.
+ */
 function toComposeHostPath(filePath) {
   return filePath.replaceAll("\\", "/");
 }
 
+/**
+ * Renders the isolated Docker Compose configuration for the dev stack.
+ */
 export function renderDevStackCompose({
   projectName = defaultDevStackProjectName,
   postgresImage,
@@ -323,6 +344,9 @@ volumes:
 `;
 }
 
+/**
+ * Writes a secret value to disk with strict POSIX file permissions.
+ */
 function writeSecretFile(filePath, value, mode = 0o600) {
   writeFileSync(filePath, `${value}\n`, { encoding: "utf8", mode });
   try {
@@ -332,6 +356,9 @@ function writeSecretFile(filePath, value, mode = 0o600) {
   }
 }
 
+/**
+ * Reads an existing secret file or generates and persists a new secret.
+ */
 function readOrCreateSecret(filePath, generator, mode = 0o600) {
   if (existsSync(filePath)) {
     const existing = readFileSync(filePath, "utf8").trim();
@@ -347,6 +374,9 @@ function readOrCreateSecret(filePath, generator, mode = 0o600) {
   return created;
 }
 
+/**
+ * Ensures per-state-directory secret files exist with 0600 permissions.
+ */
 export function ensureDevStackSecrets(config) {
   const stateDir = assertSafeStateDir(config.stateDir, config.repoRoot);
   const secretsDir = path.join(stateDir, "secrets");
@@ -424,6 +454,9 @@ export function ensureDevStackSecrets(config) {
   };
 }
 
+/**
+ * Builds the default OpenCode configuration JSON.
+ */
 export function buildOpenCodeStarterConfig({ stateDir }) {
   const resolvedStateDir = path.resolve(stateDir);
   const scratchDir = path.join(resolvedStateDir, "var", "scratch").replaceAll("\\", "/");
@@ -443,6 +476,9 @@ export function buildOpenCodeStarterConfig({ stateDir }) {
   };
 }
 
+/**
+ * Writes isolated CLI wrapper scripts and OpenCode config inside stateDir.
+ */
 export function writeCliWrapperScripts({ stateDir, opencodeBinPath }) {
   const binDir = path.join(stateDir, "bin");
   const providersDir = path.join(stateDir, "providers");
@@ -519,6 +555,9 @@ exec "$PROVIDER_Binary" "$@"
   };
 }
 
+/**
+ * Installs the pinned @opencode/cli package inside stateDir and writes CLI wrappers.
+ */
 export function ensureDevStackCliWrappers(config, { execCommand = spawnSync } = {}) {
   const dockerfilePath = path.join(config.repoRoot, "Dockerfile");
   const dockerfileText = readFileSync(dockerfilePath, "utf8");
@@ -579,6 +618,9 @@ export function ensureDevStackCliWrappers(config, { execCommand = spawnSync } = 
   };
 }
 
+/**
+ * Constructs the isolated environment variables for supervised child processes.
+ */
 export function buildDevStackChildEnv(config, secrets, baseEnv = process.env) {
   const stateDir = config.stateDir;
   const runDir = path.join(stateDir, "run");
@@ -694,6 +736,9 @@ export function buildDevStackChildEnv(config, secrets, baseEnv = process.env) {
   };
 }
 
+/**
+ * Formats the startup banner displaying URLs and the one-time owner setup token.
+ */
 export function formatReadyBanner({
   webOrigin,
   apiOrigin,
@@ -722,7 +767,10 @@ export function formatReadyBanner({
   return lines.join("\n");
 }
 
-function prefixStreamLines(stream, prefix, target) {
+/**
+ * Streams line-buffered output from a child stream with a [service] prefix.
+ */
+function prefixStreamLines(stream, prefix, target, onLine) {
   let buffer = "";
   stream.on("data", (chunk) => {
     buffer += chunk.toString("utf8");
@@ -731,22 +779,29 @@ function prefixStreamLines(stream, prefix, target) {
     for (const line of lines) {
       if (line.trim().length > 0) {
         target.write(`[${prefix}] ${line}\n`);
+        onLine?.(line);
       }
     }
   });
   stream.on("end", () => {
     if (buffer.trim().length > 0) {
       target.write(`[${prefix}] ${buffer}\n`);
+      onLine?.(buffer);
       buffer = "";
     }
   });
 }
 
+/**
+ * Spawns and supervises all source child processes, failing fast on unexpected crashes
+ * and restarting dependent services when the packages watcher rebuilds.
+ */
 export function superviseChildProcesses(serviceSpecs, {
   spawnProcess = spawn,
   stdout = process.stdout,
   stderr = process.stderr,
-  onUnexpectedExit
+  onUnexpectedExit,
+  onPidsChanged
 } = {}) {
   const children = new Map();
   let shuttingDown = false;
@@ -755,6 +810,14 @@ export function superviseChildProcesses(serviceSpecs, {
   const failurePromise = new Promise((resolve) => {
     resolveFailure = resolve;
   });
+
+  const getPids = () => {
+    const pids = {};
+    for (const [name, { child }] of children) {
+      if (child.pid) pids[name] = child.pid;
+    }
+    return pids;
+  };
 
   const stopAll = async (signal = "SIGTERM", timeoutMs = 5_000) => {
     shuttingDown = true;
@@ -786,19 +849,64 @@ export function superviseChildProcesses(serviceSpecs, {
     }
   };
 
-  for (const spec of serviceSpecs) {
+  let initialPackageWatchDone = false;
+
+  const restartPackageDependents = async () => {
+    for (const [name, entry] of children) {
+      if (!entry.spec.restartOnPackageRebuild || shuttingDown || firstFailure) continue;
+      entry.restarting = true;
+      const oldChild = entry.child;
+      if (oldChild.exitCode === null && oldChild.signalCode === null) {
+        const exited = new Promise((resolve) => {
+          oldChild.once("exit", () => resolve());
+        });
+        try {
+          oldChild.kill("SIGTERM");
+        } catch {}
+        await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 2_000))]);
+        if (oldChild.exitCode === null && oldChild.signalCode === null) {
+          try {
+            oldChild.kill("SIGKILL");
+          } catch {}
+        }
+      }
+      if (shuttingDown || firstFailure) return;
+      stdout.write(`[dev:stack] Restarting "${name}" after workspace package rebuild...\n`);
+      startService(entry.spec);
+    }
+    onPidsChanged?.(getPids());
+  };
+
+  /**
+   * Spawns a single service specification and wires up output logging and crash supervision.
+   */
+  function startService(spec) {
     const child = spawnProcess(spec.command, spec.args, {
       cwd: spec.cwd,
       env: spec.env,
       stdio: ["ignore", "pipe", "pipe"]
     });
-    if (child.stdout) prefixStreamLines(child.stdout, spec.name, stdout);
-    if (child.stderr) prefixStreamLines(child.stderr, spec.name, stderr);
+    const entry = { spec, child, restarting: false };
+    children.set(spec.name, entry);
 
-    children.set(spec.name, { spec, child });
+    const handleOutputLine =
+      spec.name === "packages"
+        ? (line) => {
+            if (/Found 0 errors\.\s*Watching for file changes\./i.test(line)) {
+              if (!initialPackageWatchDone) {
+                initialPackageWatchDone = true;
+              } else {
+                void restartPackageDependents();
+              }
+            }
+          }
+        : undefined;
+
+    if (child.stdout) prefixStreamLines(child.stdout, spec.name, stdout, handleOutputLine);
+    if (child.stderr) prefixStreamLines(child.stderr, spec.name, stderr, handleOutputLine);
 
     child.once("error", (error) => {
-      if (shuttingDown || firstFailure) return;
+      if (entry.restarting || shuttingDown || firstFailure) return;
       firstFailure = {
         service: spec.name,
         code: 1,
@@ -815,7 +923,7 @@ export function superviseChildProcesses(serviceSpecs, {
     });
 
     child.once("exit", (code, signal) => {
-      if (shuttingDown || firstFailure) return;
+      if (entry.restarting || shuttingDown || firstFailure) return;
       firstFailure = {
         service: spec.name,
         code: code ?? 1,
@@ -832,24 +940,28 @@ export function superviseChildProcesses(serviceSpecs, {
     });
   }
 
+  for (const spec of serviceSpecs) {
+    startService(spec);
+  }
+
   return {
     children,
     failurePromise,
     stopAll,
-    getPids: () => {
-      const pids = {};
-      for (const [name, { child }] of children) {
-        if (child.pid) pids[name] = child.pid;
-      }
-      return pids;
-    }
+    getPids
   };
 }
 
+/**
+ * Sleeps for the specified duration in milliseconds.
+ */
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * Fetches a URL and parses its response body as JSON when possible.
+ */
 async function fetchJson(url, options = {}) {
   const response = await fetch(url, options);
   const text = await response.text();
@@ -862,6 +974,9 @@ async function fetchJson(url, options = {}) {
   return { response, body };
 }
 
+/**
+ * Polls API /readyz and the Vite web server until both report ready.
+ */
 export async function waitForStackReadiness({
   apiOrigin,
   webOrigin,
@@ -914,6 +1029,9 @@ export async function waitForStackReadiness({
   );
 }
 
+/**
+ * Checks whether a numeric process ID currently exists.
+ */
 function isPidAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
@@ -924,7 +1042,72 @@ function isPidAlive(pid) {
   }
 }
 
-async function terminateRecordedProcesses(stateDir) {
+/**
+ * Reads the command line string of a running process ID using /proc/<pid>/cmdline or ps.
+ */
+export function readProcessCommand(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return "";
+  const procCmdlinePath = `/proc/${pid}/cmdline`;
+  if (existsSync(procCmdlinePath)) {
+    try {
+      const cmdline = readFileSync(procCmdlinePath, "utf8").replaceAll("\0", " ").trim();
+      if (cmdline) return cmdline;
+    } catch {}
+  }
+  try {
+    const psResult = spawnSync("ps", ["-p", String(pid), "-o", "command="], {
+      encoding: "utf8"
+    });
+    if (psResult.status === 0 && typeof psResult.stdout === "string") {
+      return psResult.stdout.trim();
+    }
+  } catch {}
+  return "";
+}
+
+/**
+ * Verifies that a live PID recorded in pids.json still belongs to this checkout dev stack.
+ */
+export function isRecordedDevStackProcess(
+  pid,
+  {
+    repoRoot = defaultRepoRoot,
+    stateDir = "",
+    inspectCommand = readProcessCommand
+  } = {}
+) {
+  const commandLine = inspectCommand(pid);
+  if (typeof commandLine !== "string" || !commandLine.trim()) {
+    return false;
+  }
+  const normalizedCmd = commandLine.replaceAll("\\", "/");
+  const normalizedRepo = repoRoot ? path.resolve(repoRoot).replaceAll("\\", "/") : "";
+  const normalizedState = stateDir ? path.resolve(stateDir).replaceAll("\\", "/") : "";
+  const markers = [
+    normalizedRepo,
+    normalizedState,
+    "scripts/dev-stack.mjs",
+    "packages/cli-host/dist/main.js",
+    "apps/worker/dist/worker.js",
+    "apps/api/src/server.ts",
+    "vite"
+  ].filter(Boolean);
+  return markers.some((marker) => normalizedCmd.includes(marker));
+}
+
+/**
+ * Terminates any running supervisor or child processes recorded in <stateDir>/pids.json
+ * after verifying that each PID still belongs to the SpaceApp dev stack.
+ */
+export async function terminateRecordedProcesses(
+  stateDir,
+  {
+    repoRoot = defaultRepoRoot,
+    inspectCommand = readProcessCommand,
+    sendSignal = (pid, sig) => process.kill(pid, sig),
+    checkAlive = isPidAlive
+  } = {}
+) {
   const pidsPath = path.join(stateDir, "pids.json");
   if (!existsSync(pidsPath)) return;
   let recorded;
@@ -935,42 +1118,54 @@ async function terminateRecordedProcesses(stateDir) {
     return;
   }
 
-  const candidatePids = [];
+  const effectiveRepoRoot = recorded?.repoRoot || repoRoot;
+  const rawPids = [];
   if (Number.isInteger(recorded?.supervisorPid) && recorded.supervisorPid !== process.pid) {
-    candidatePids.push(recorded.supervisorPid);
+    rawPids.push(recorded.supervisorPid);
   }
   if (recorded?.children && typeof recorded.children === "object") {
     for (const pid of Object.values(recorded.children)) {
       if (Number.isInteger(pid) && pid !== process.pid) {
-        candidatePids.push(pid);
+        rawPids.push(pid);
       }
     }
   }
 
-  for (const pid of candidatePids) {
-    if (isPidAlive(pid)) {
-      try {
-        process.kill(pid, "SIGTERM");
-      } catch {}
-    }
+  const verifiedPids = rawPids.filter(
+    (pid) =>
+      checkAlive(pid) &&
+      isRecordedDevStackProcess(pid, {
+        repoRoot: effectiveRepoRoot,
+        stateDir,
+        inspectCommand
+      })
+  );
+
+  for (const pid of verifiedPids) {
+    try {
+      sendSignal(pid, "SIGTERM");
+    } catch {}
   }
 
   const deadline = Date.now() + 6_000;
   while (Date.now() < deadline) {
-    if (!candidatePids.some((pid) => isPidAlive(pid))) break;
+    if (!verifiedPids.some((pid) => checkAlive(pid))) break;
     await sleep(150);
   }
 
-  for (const pid of candidatePids) {
-    if (isPidAlive(pid)) {
+  for (const pid of verifiedPids) {
+    if (checkAlive(pid)) {
       try {
-        process.kill(pid, "SIGKILL");
+        sendSignal(pid, "SIGKILL");
       } catch {}
     }
   }
   rmSync(pidsPath, { force: true });
 }
 
+/**
+ * Executes docker compose scoped to the dev-stack project and state directory.
+ */
 function runDockerCompose(config, composeArgs, { allowFailure = false } = {}) {
   const composeFilePath = path.join(config.stateDir, "compose.yml");
   const args = ["compose", "-p", config.projectName];
@@ -989,6 +1184,9 @@ function runDockerCompose(config, composeArgs, { allowFailure = false } = {}) {
   return result;
 }
 
+/**
+ * Removes Docker containers and volumes labeled with the dev-stack project name.
+ */
 function removeLabeledDockerResources(projectName) {
   const containers = spawnSync(
     "docker",
@@ -1017,9 +1215,12 @@ function removeLabeledDockerResources(projectName) {
   }
 }
 
+/**
+ * Stops dev-stack processes and Docker containers while preserving volumes and state.
+ */
 export async function downDevStack(config) {
   assertSafeStateDir(config.stateDir, config.repoRoot);
-  await terminateRecordedProcesses(config.stateDir);
+  await terminateRecordedProcesses(config.stateDir, { repoRoot: config.repoRoot });
   if (existsSync(path.join(config.stateDir, "compose.yml"))) {
     runDockerCompose(config, ["down", "--remove-orphans"], { allowFailure: true });
   } else {
@@ -1028,6 +1229,9 @@ export async function downDevStack(config) {
   process.stdout.write(`[dev:stack] Stopped "${config.projectName}" processes and containers (state preserved at ${config.stateDir}).\n`);
 }
 
+/**
+ * Stops dev-stack processes and removes its containers, volumes, and state directory.
+ */
 export async function resetDevStack(config, { removeDocker = true } = {}) {
   const resolvedStateDir = assertSafeStateDir(config.stateDir, config.repoRoot);
   if (existsSync(resolvedStateDir)) {
@@ -1045,7 +1249,7 @@ export async function resetDevStack(config, { removeDocker = true } = {}) {
     }
   }
 
-  await terminateRecordedProcesses(resolvedStateDir);
+  await terminateRecordedProcesses(resolvedStateDir, { repoRoot: config.repoRoot });
   if (removeDocker) {
     if (existsSync(path.join(resolvedStateDir, "compose.yml"))) {
       runDockerCompose(config, ["down", "-v", "--remove-orphans"], { allowFailure: true });
@@ -1057,6 +1261,9 @@ export async function resetDevStack(config, { removeDocker = true } = {}) {
   process.stdout.write(`[dev:stack] Reset complete: removed "${config.projectName}" containers, volumes, and ${resolvedStateDir}.\n`);
 }
 
+/**
+ * Extracts the session cookie from an HTTP response.
+ */
 function extractSessionCookie(response) {
   const setCookies =
     typeof response.headers.getSetCookie === "function"
@@ -1069,6 +1276,9 @@ function extractSessionCookie(response) {
   return null;
 }
 
+/**
+ * Verifies that the CLI terminal WebSocket endpoint accepts an authenticated upgrade.
+ */
 async function verifyWebSocketAttach(wsUrl, origin, cookie) {
   if (typeof WebSocket !== "function") return;
   await new Promise((resolve, reject) => {
@@ -1098,6 +1308,9 @@ async function verifyWebSocketAttach(wsUrl, origin, cookie) {
   });
 }
 
+/**
+ * Runs an end-to-end HTTP and WebSocket smoke check against a running dev stack.
+ */
 export async function runDevStackSmoke(config) {
   const apiOrigin = `http://127.0.0.1:${config.apiPort}`;
   const webOrigin = `http://127.0.0.1:${config.webPort}`;
@@ -1260,6 +1473,9 @@ export async function runDevStackSmoke(config) {
   return summary;
 }
 
+/**
+ * Queries and prints the current readiness status of the dev stack as JSON.
+ */
 export async function statusDevStack(config) {
   const apiOrigin = `http://127.0.0.1:${config.apiPort}`;
   const webOrigin = `http://127.0.0.1:${config.webPort}`;
@@ -1280,6 +1496,9 @@ export async function statusDevStack(config) {
   return status;
 }
 
+/**
+ * Prints CLI usage instructions for npm run dev:stack.
+ */
 function printUsage() {
   process.stdout.write(`Usage: npm run dev:stack [-- <command> [options]]
 
@@ -1302,8 +1521,11 @@ Options:
 `);
 }
 
+/**
+ * Starts the full SpaceApp contributor stack from source.
+ */
 export async function upDevStack(config) {
-  await terminateRecordedProcesses(config.stateDir);
+  await terminateRecordedProcesses(config.stateDir, { repoRoot: config.repoRoot });
   const secrets = ensureDevStackSecrets(config);
   const cliWrappers = ensureDevStackCliWrappers(config);
 
@@ -1366,16 +1588,18 @@ export async function upDevStack(config) {
     {
       name: "cli-host",
       command: process.execPath,
-      args: ["--watch", path.join(config.repoRoot, "packages", "cli-host", "dist", "main.js")],
+      args: [path.join(config.repoRoot, "packages", "cli-host", "dist", "main.js")],
       cwd: config.repoRoot,
-      env: childEnv
+      env: childEnv,
+      restartOnPackageRebuild: true
     },
     {
       name: "worker",
       command: process.execPath,
-      args: ["--watch", path.join(config.repoRoot, "apps", "worker", "dist", "worker.js")],
+      args: [path.join(config.repoRoot, "apps", "worker", "dist", "worker.js")],
       cwd: config.repoRoot,
-      env: childEnv
+      env: childEnv,
+      restartOnPackageRebuild: true
     },
     {
       name: "api",
@@ -1427,26 +1651,38 @@ export async function upDevStack(config) {
     });
   }
 
-  const supervisor = superviseChildProcesses(serviceSpecs);
   const pidsPath = path.join(config.stateDir, "pids.json");
-  writeFileSync(
-    pidsPath,
-    `${JSON.stringify(
-      {
-        supervisorPid: process.pid,
-        projectName: config.projectName,
-        apiPort: config.apiPort,
-        webPort: config.webPort,
-        postgresPort: config.postgresPort,
-        temporalPort: config.temporalPort,
-        opencodeSpec: cliWrappers.opencodeSpec,
-        children: supervisor.getPids()
-      },
-      null,
-      2
-    )}\n`,
-    { encoding: "utf8", mode: 0o600 }
-  );
+  const writePidsFile = (childPids) => {
+    writeFileSync(
+      pidsPath,
+      `${JSON.stringify(
+        {
+          supervisorPid: process.pid,
+          repoRoot: config.repoRoot,
+          stateDir: config.stateDir,
+          projectName: config.projectName,
+          apiPort: config.apiPort,
+          webPort: config.webPort,
+          postgresPort: config.postgresPort,
+          temporalPort: config.temporalPort,
+          opencodeSpec: cliWrappers.opencodeSpec,
+          children: childPids
+        },
+        null,
+        2
+      )}\n`,
+      { encoding: "utf8", mode: 0o600 }
+    );
+  };
+
+  const supervisor = superviseChildProcesses(serviceSpecs, {
+    onPidsChanged: (updatedPids) => {
+      try {
+        writePidsFile(updatedPids);
+      } catch {}
+    }
+  });
+  writePidsFile(supervisor.getPids());
 
   let shuttingDown = false;
   const handleSignal = (signal) => {
@@ -1460,6 +1696,7 @@ export async function upDevStack(config) {
   };
   process.once("SIGINT", () => handleSignal("SIGINT"));
   process.once("SIGTERM", () => handleSignal("SIGTERM"));
+  process.once("SIGHUP", () => handleSignal("SIGHUP"));
 
   try {
     await waitForStackReadiness({
@@ -1512,6 +1749,9 @@ export async function upDevStack(config) {
   }
 }
 
+/**
+ * CLI entrypoint dispatching dev:stack subcommands.
+ */
 export async function runDevStack(argv = process.argv.slice(2), env = process.env) {
   const config = parseDevStackArgs(argv, env, defaultRepoRoot);
   if (config.command === "help") {

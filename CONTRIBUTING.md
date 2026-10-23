@@ -104,9 +104,64 @@ to return to a clean first-run state:
 npm run dev:stack -- reset
 ```
 
-On Windows 11, run `npm run dev:stack` inside a WSL2 Linux distribution with
-Docker Desktop WSL2 integration enabled (and keep the checkout on the Linux
-filesystem inside WSL2 for fast file watching and Unix domain socket support).
+Verify readiness, claim owner setup over HTTP, and verify that the Getting
+Started OpenCode CLI pane reaches `RUNNING` without a browser TTY:
+
+```sh
+npm run dev:stack:smoke
+```
+
+Sample readiness and smoke output:
+
+```text
+============================================================
+SpaceApp contributor dev stack is ready!
+  Web URL:      http://127.0.0.1:5911
+  API URL:      http://127.0.0.1:5910
+  Readiness:    http://127.0.0.1:5910/readyz
+  Setup token:  <one-time-owner-setup-token>
+  (One-time owner setup token — enter this at the Web URL to create the owner account)
+  Stop stack:   npm run dev:stack -- down
+  Reset stack:  npm run dev:stack -- reset
+============================================================
+
+{
+  "ok": true,
+  "readyzOk": true,
+  "roomName": "Getting Started",
+  "runtimeId": "cli:opencode",
+  "status": "RUNNING"
+}
+```
+
+### Platform notes (Linux, macOS, Windows 11 WSL2)
+
+- **Linux:** Ensure your user can reach the Docker daemon (`docker info`) and
+  `docker compose version` succeeds. All ports bind strictly to `127.0.0.1`.
+- **macOS (Docker Desktop or Colima):** Start Docker Desktop or Colima
+  (`colima start --cpu 4 --memory 8`) before running `npm run dev:stack`. Keep
+  the repository inside your macOS user home directory so bind-mounted secret
+  files under `.dev-stack/secrets/` are shared into the Linux VM automatically.
+  If `node-pty` needs to compile from source, install Xcode Command Line Tools
+  (`xcode-select --install`).
+- **Windows 11 (WSL2):** Run `npm run dev:stack` inside a WSL2 Linux
+  distribution (for example Ubuntu 24.04) with Docker Desktop WSL2 integration
+  enabled, and keep the checkout on the Linux ext4 filesystem inside WSL2 (not
+  `/mnt/c/`) for fast file watching and Unix domain socket support.
+
+### Troubleshooting
+
+- **Port already in use:** Override any colliding loopback port with
+  `SPACE_API_PORT`, `SPACE_WEB_PORT`, `SPACE_DEV_POSTGRES_PORT`, or
+  `SPACE_DEV_TEMPORAL_PORT` (or `--api-port`, `--web-port`, `--postgres-port`,
+  `--temporal-port`).
+- **Docker daemon or container health check failure:** Verify `docker ps` works
+  and run `npm run dev:stack -- reset` to recreate the `spaceapp-dev` containers
+  and volumes cleanly.
+- **Socket path length limit:** The CLI host Unix socket lives at
+  `.dev-stack/run/pane-host.sock`. If your checkout path is deeply nested
+  (>90 characters), pass `--state-dir /tmp/spaceapp-dev-stack` so the socket
+  path stays within the OS `sun_path` limit.
 
 ## Make and verify a small change
 

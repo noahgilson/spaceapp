@@ -20,8 +20,8 @@
     {
       "path": "CONTRIBUTING.md",
       "sourceObjectId": "078772388754304e33d238fefaad2f04e9120107",
-      "sha256": "c1a2658c4b562c7069ff6f6c7e3256f793ba1c556b8fbf60f2258ed8b539f69d",
-      "size": 7591
+      "sha256": "c19a86615553367d0dfb6a3f0cfba59c30b9923cda2909b47681e6f078d39faf",
+      "size": 9839
     },
     {
       "path": "LICENSE",
@@ -21662,8 +21662,8 @@
     {
       "path": "apps/web/vite.config.ts",
       "sourceObjectId": "440a79e31a3f86df0c66bb67ed1d44a4dbcba128",
-      "sha256": "087b702c72e8ee462050f0386afb745160357cc3be0268bfff7a989075ff8fbe",
-      "size": 3058
+      "sha256": "369aaeebf0150947abd4abb98f0f6fbaee91b2622fc469e138d09542ef2ea71b",
+      "size": 3506
     },
     {
       "path": "apps/web/vite.demo-boundary.ts",
