@@ -50,6 +50,64 @@ select a short temporary directory you own and set `TMPDIR` for the command.
 On Windows run this particular smoke check inside WSL or a Linux development
 container. It does not certify the Windows/macOS installer.
 
+## Run the full app from source
+
+When you need the complete SpaceApp stack (PostgreSQL with `pgvector`, Temporal,
+the API in watch mode, the Vite web dev server, the Temporal worker, and the
+CLI host with the preconfigured OpenCode CLI) running from your checkout with
+hot reload, start the contributor source stack after `npm ci`:
+
+```sh
+npm run dev:stack
+```
+
+Prerequisites:
+
+- Node **>=22.12 <23** and npm (same as above)
+- Docker Engine / Docker Desktop with `docker compose` available (Linux, macOS,
+  or Windows 11 with WSL2 integration enabled)
+
+What `npm run dev:stack` does:
+
+1. Reads the digest-pinned PostgreSQL (`pgvector`) and Temporal container images
+   from `packages/run-spaceapp/templates/compose.yml` and starts them under the
+   isolated `spaceapp-dev` Compose project bound only to `127.0.0.1`.
+2. Generates per-checkout secrets and runtime state under `.dev-stack/`
+   (git-ignored, `0700`/`0600` permissions) and runs `npm run db:migrate`.
+3. Installs the pinned `@opencode/cli` version from `Dockerfile` into
+   `.dev-stack/opencode` and writes local CLI wrappers into `.dev-stack/bin` so
+   the **Getting Started** room's OpenCode CLI pane reaches `RUNNING` without an
+   external AI provider account.
+4. Builds workspace packages and supervises `packages/cli-host`, `apps/worker`,
+   `apps/api` (`tsx watch`), and `apps/web` (Vite HMR).
+5. Prints the Web URL, API URL, and the one-time owner setup token (until owner
+   setup is claimed).
+
+Default loopback ports (chosen so `dev:stack` never collides with an installed
+`run-spaceapp` instance on `4910`/`4911`):
+
+- Web (Vite dev server): `127.0.0.1:5911` (override with `SPACE_WEB_PORT` or `--web-port`)
+- API: `127.0.0.1:5910` (override with `SPACE_API_PORT` or `--api-port`)
+- PostgreSQL: `127.0.0.1:55432` (override with `SPACE_DEV_POSTGRES_PORT` or `--postgres-port`)
+- Temporal: `127.0.0.1:57233` (override with `SPACE_DEV_TEMPORAL_PORT` or `--temporal-port`)
+
+Stop the stack while keeping your database volume and claimed owner account:
+
+```sh
+npm run dev:stack -- down
+```
+
+Remove the `spaceapp-dev` containers, volumes, and `.dev-stack/` state directory
+to return to a clean first-run state:
+
+```sh
+npm run dev:stack -- reset
+```
+
+On Windows 11, run `npm run dev:stack` inside a WSL2 Linux distribution with
+Docker Desktop WSL2 integration enabled (and keep the checkout on the Linux
+filesystem inside WSL2 for fast file watching and Unix domain socket support).
+
 ## Make and verify a small change
 
 Work on a branch, not on `main`, so the change can become a pull request:

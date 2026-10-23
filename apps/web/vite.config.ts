@@ -17,6 +17,15 @@ export function manualChunkForModule(moduleId: string): string | undefined {
   return undefined;
 }
 
+export function resolveViteApiOrigin(env: NodeJS.ProcessEnv = process.env): string {
+  const explicit = env.SPACE_API_ORIGIN?.trim();
+  if (explicit) return explicit.replace(/\/+$/, "");
+  const apiPort = env.SPACE_API_PORT?.trim() || "4910";
+  return `http://127.0.0.1:${apiPort}`;
+}
+
+const apiOrigin = resolveViteApiOrigin();
+
 export default defineConfig({
   plugins: [react(), demoBundleBoundaryPlugin(), retainOpenTabAssets()],
   // The icon package ships as source; the alias keeps worktrees (which share live node_modules) resolving this checkout.
@@ -34,11 +43,16 @@ export default defineConfig({
     host: process.env.SPACE_WEB_HOST ?? "0.0.0.0",
     port: Number.parseInt(process.env.SPACE_WEB_PORT ?? "4911", 10),
     proxy: {
-      "/api": "http://127.0.0.1:4910",
-      "/plugins": "http://127.0.0.1:4910",
-      "/healthz": "http://127.0.0.1:4910",
-      "/readyz": "http://127.0.0.1:4910",
-      "/version": "http://127.0.0.1:4910"
+      "/api": {
+        target: apiOrigin,
+        ws: true
+      },
+      "/plugins": apiOrigin,
+      "/logout": apiOrigin,
+      "/healthz": apiOrigin,
+      "/livez": apiOrigin,
+      "/readyz": apiOrigin,
+      "/version": apiOrigin
     }
   },
   test: {
