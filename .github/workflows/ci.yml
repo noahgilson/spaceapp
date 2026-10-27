@@ -60,3 +60,77 @@ jobs:
       - name: Pack launcher candidate
         working-directory: ${{ runner.temp }}/spaceapp-public-export
         run: npm run pack:dry-run -w run-spaceapp
+
+  dev-stack-smoke:
+    # Issue #65: the contributor source stack starts without a TTY, completes owner setup,
+    # opens the Getting Started OpenCode pane, and resets to a clean machine.
+    name: Contributor dev stack smoke (Linux, Docker)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Start the source stack without a TTY
+        run: |
+          docker version --format 'Docker {{.Server.Version}}'
+          docker compose version
+          echo "DEV_STACK_LOG=$RUNNER_TEMP/dev-stack.log" >> "$GITHUB_ENV"
+          nohup npm run dev:stack < /dev/null > "$RUNNER_TEMP/dev-stack.log" 2>&1 &
+          echo "DEV_STACK_PID=$!" >> "$GITHUB_ENV"
+
+      - name: Wait for readiness
+        run: |
+          for _ in $(seq 1 120); do
+            if ! kill -0 "$DEV_STACK_PID" 2>/dev/null; then
+              echo "dev:stack exited before it became ready" >&2
+              exit 1
+            fi
+            if node scripts/dev-stack.mjs status | grep -q '"ready": true'; then
+              node scripts/dev-stack.mjs status
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "dev:stack did not become ready within 10 minutes" >&2
+          exit 1
+
+      - name: Owner setup and OpenCode pane reaches RUNNING
+        run: npm run dev:stack -- smoke
+
+      - name: Reset the stack
+        run: npm run dev:stack -- reset
+
+      - name: Verify containers, volumes, and processes are gone
+        run: |
+          project=com.docker.compose.project=spaceapp-dev
+          for _ in $(seq 1 15); do
+            leftovers="$(pgrep -af -- "$GITHUB_WORKSPACE/" || true)"
+            if [ -z "$leftovers" ] && ! kill -0 "$DEV_STACK_PID" 2>/dev/null; then break; fi
+            sleep 1
+          done
+          status=0
+          if [ -n "$(docker ps -aq --filter "label=$project")" ]; then echo "containers remain" >&2; docker ps -a --filter "label=$project" >&2; status=1; fi
+          if [ -n "$(docker volume ls -q --filter "label=$project")" ]; then echo "volumes remain" >&2; docker volume ls --filter "label=$project" >&2; status=1; fi
+          if [ -n "$(docker network ls -q --filter "label=$project")" ]; then echo "networks remain" >&2; status=1; fi
+          if kill -0 "$DEV_STACK_PID" 2>/dev/null; then echo "dev:stack supervisor still running" >&2; status=1; fi
+          if [ -n "$(pgrep -af -- "$GITHUB_WORKSPACE/" || true)" ]; then echo "processes remain:" >&2; pgrep -af -- "$GITHUB_WORKSPACE/" >&2; status=1; fi
+          if [ -e .dev-stack ]; then echo ".dev-stack/ remains" >&2; status=1; fi
+          [ "$status" -eq 0 ] && echo "No spaceapp-dev containers, volumes, networks, processes, or .dev-stack/ remain."
+          exit "$status"
+
+      - name: Show dev stack diagnostics
+        if: failure()
+        run: |
+          tail -n 200 "$DEV_STACK_LOG" || true
+          docker ps -a --filter label=com.docker.compose.project=spaceapp-dev || true
+          docker compose -p spaceapp-dev logs --tail 100 || true

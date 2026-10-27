@@ -25,6 +25,21 @@ test("CI creates and validates only the sanitized public candidate", async () =>
   assert.doesNotMatch(ci, /public-deployment-config\.test\.ts/);
 });
 
+test("CI runs the contributor dev stack end to end on Linux and verifies reset (issue #65)", async () => {
+  const ci = await workflow("ci.yml");
+  const job = ci.match(/\n {2}dev-stack-smoke:\n([\s\S]*?)(?=\n {2}[a-z][\w-]*:\n|$)/)?.[1] || "";
+
+  assert.match(job, /runs-on: ubuntu-latest/);
+  assert.match(job, /node-version-file: \.nvmrc/);
+  assert.match(job, /nohup npm run dev:stack < \/dev\/null/);
+  assert.match(job, /node scripts\/dev-stack\.mjs status \| grep -q '"ready": true'/);
+  assert.match(job, /run: npm run dev:stack -- smoke/);
+  assert.match(job, /run: npm run dev:stack -- reset/);
+  assert.match(job, /docker ps -aq --filter "label=\$project"/);
+  assert.match(job, /docker volume ls -q --filter "label=\$project"/);
+  assert.match(job, /pgrep -af -- "\$GITHUB_WORKSPACE\/"/);
+});
+
 test("launcher and container matrices cover the declared operating systems and architectures", async () => {
   const platform = await workflow("platform-matrix.yml");
   const containers = await workflow("containers.yml");
