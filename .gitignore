@@ -53,3 +53,5 @@ projects/
 
 run-spaceapp-*.tgz
 .dev-stack/
+# Incremental build state written by the dev:stack package watcher (tsc -b --watch).
+*.tsbuildinfo

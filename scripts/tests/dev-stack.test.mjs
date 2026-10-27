@@ -15,6 +15,8 @@ import { PassThrough } from "node:stream";
 import test from "node:test";
 import {
   assertSafeStateDir,
+  buildCliTerminalWebSocketUrl,
+  buildDevStackApiEnv,
   buildDevStackChildEnv,
   defaultDevStackPorts,
   defaultRepoRoot,
@@ -25,7 +27,9 @@ import {
   readPinnedOpenCodePackageSpec,
   renderDevStackCompose,
   resetDevStack,
+  resolvePackageBin,
   isRecordedDevStackProcess,
+  listResponseItems,
   superviseChildProcesses,
   terminateRecordedProcesses,
   writeCliWrapperScripts
@@ -136,6 +140,26 @@ test("renderDevStackCompose binds ports strictly to 127.0.0.1 and pins digests",
   assert.ok(yaml.includes(temporalImage));
 });
 
+test("renderDevStackCompose configures Temporal the way the pinned auto-setup image expects", () => {
+  const yaml = renderDevStackCompose({
+    postgresImage: `pgvector/pgvector:pg17@sha256:${"a".repeat(64)}`,
+    temporalImage: `temporalio/auto-setup:1.29.1@sha256:${"b".repeat(64)}`,
+    postgresPasswordFile: "/tmp/example/.dev-stack/secrets/postgres-password",
+    temporalPasswordFile: "/tmp/example/.dev-stack/secrets/postgres-password-container"
+  });
+
+  // temporalio/auto-setup ignores POSTGRES_PWD_FILE; the secret must be exported as POSTGRES_PWD.
+  assert.doesNotMatch(yaml, /POSTGRES_PWD_FILE/);
+  assert.ok(
+    yaml.includes('export POSTGRES_PWD="$$(cat /run/secrets/postgres_password_temporal)"; exec /etc/temporal/entrypoint.sh autosetup')
+  );
+  // Temporal listens on the container IP, so a 127.0.0.1 health check never succeeds.
+  assert.doesNotMatch(yaml, /--address", "127\.0\.0\.1:7233"/);
+  assert.match(yaml, /temporal operator cluster health --address temporal:7233/);
+  // The pinned auto-setup image ships config/dynamicconfig/docker.yaml, not development-sql.yaml.
+  assert.match(yaml, /DYNAMIC_CONFIG_FILE_PATH: config\/dynamicconfig\/docker\.yaml/);
+});
+
 test("ensureDevStackSecrets and formatReadyBanner protect secrets and print setup token only while unclaimed", async () => {
   const scratchParent = mkdtempSync(path.join(os.tmpdir(), "spaceapp-dev-stack-test-"));
   const stateDir = path.join(scratchParent, ".dev-stack");
@@ -178,6 +202,12 @@ test("ensureDevStackSecrets and formatReadyBanner protect secrets and print setu
     assert.equal(env.SPACEAPP_WORKFLOWS_ENABLED, "true");
     assert.equal(env.SPACE_DEV_LOGIN, "false");
     assert.equal(env.SPACE_SETUP_TOKEN_FILE, undefined);
+    // Only the API process receives the session secret value (apps/api reads SPACE_SESSION_SECRET only).
+    assert.equal(env.SPACE_SESSION_SECRET, undefined);
+    const apiEnv = buildDevStackApiEnv(env, secrets);
+    assert.equal(apiEnv.SPACE_SESSION_SECRET, secrets.sessionSecret);
+    assert.ok(apiEnv.SPACE_SESSION_SECRET.length >= 16);
+    assert.equal(env.SPACE_SESSION_SECRET, undefined);
 
     const wrappers = writeCliWrapperScripts({
       stateDir,
@@ -379,4 +409,38 @@ test("superviseChildProcesses restarts restartOnPackageRebuild services after in
   assert.equal(updatedPids?.worker, spawned[2].proc.pid);
 
   await supervisor.stopAll();
+});
+
+test("resolvePackageBin points supervised tools at their JS entrypoints instead of npx wrappers", () => {
+  const tsxBin = resolvePackageBin(path.join(defaultRepoRoot, "apps", "api"), "tsx");
+  const viteBin = resolvePackageBin(path.join(defaultRepoRoot, "apps", "web"), "vite");
+  const tscBin = resolvePackageBin(defaultRepoRoot, "typescript", "tsc");
+  for (const bin of [tsxBin, viteBin, tscBin]) {
+    assert.equal(path.isAbsolute(bin), true);
+    assert.equal(existsSync(bin), true, `${bin} should exist`);
+  }
+  assert.match(tsxBin.replaceAll("\\", "/"), /node_modules\/tsx\//);
+  assert.match(viteBin.replaceAll("\\", "/"), /node_modules\/vite\//);
+  assert.match(tscBin.replaceAll("\\", "/"), /node_modules\/typescript\/bin\/tsc$/);
+  assert.throws(() => resolvePackageBin(defaultRepoRoot, "typescript", "not-a-bin"), /does not declare/);
+});
+
+test("smoke helpers follow the API's paginated list shape and CLI terminal WebSocket contract", () => {
+  assert.deepEqual(listResponseItems({ data: [{ id: "room:1" }], pagination: { page: 1 } }), [{ id: "room:1" }]);
+  assert.equal(listResponseItems({ rooms: [] }), null);
+  assert.equal(listResponseItems(null), null);
+
+  const url = new URL(
+    buildCliTerminalWebSocketUrl("http://127.0.0.1:5911", "pane:abc", {
+      paneId: "pane:abc",
+      sessionId: "cli_session:xyz",
+      token: "t".repeat(32)
+    })
+  );
+  assert.equal(url.protocol, "ws:");
+  assert.equal(url.host, "127.0.0.1:5911");
+  assert.equal(url.pathname, "/api/panes/pane%3Aabc/cli/terminal");
+  assert.equal(url.searchParams.get("sessionId"), "cli_session:xyz");
+  assert.equal(url.searchParams.get("token"), "t".repeat(32));
+  assert.throws(() => buildCliTerminalWebSocketUrl("http://127.0.0.1:5911", "pane:abc", {}), /WebSocket ticket/);
 });

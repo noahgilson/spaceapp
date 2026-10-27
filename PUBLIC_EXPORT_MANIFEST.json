@@ -8,8 +8,8 @@
     {
       "path": ".gitignore",
       "sourceObjectId": "1fdf2ac77a391fc36521502732002c96a11913d4",
-      "sha256": "1d53a86657539079e992eaf1bc0bfd368d53e407e02066eb1c507b10d6553ed1",
-      "size": 1156
+      "sha256": "c484a1fd574c4fda8a5c19885836d34720e15abb6029df396dd9ed26205c1608",
+      "size": 1255
     },
     {
       "path": ".nvmrc",
@@ -20,8 +20,8 @@
     {
       "path": "CONTRIBUTING.md",
       "sourceObjectId": "078772388754304e33d238fefaad2f04e9120107",
-      "sha256": "c19a86615553367d0dfb6a3f0cfba59c30b9923cda2909b47681e6f078d39faf",
-      "size": 9839
+      "sha256": "a1e6ab4b68846d375642ea8ada76bd9d1ce141995bdbd7845007487b6423a5f5",
+      "size": 9842
     },
     {
       "path": "LICENSE",

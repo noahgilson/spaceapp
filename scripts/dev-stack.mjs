@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { createRequire } from "node:module";
 import {
   chmodSync,
   existsSync,
@@ -326,15 +327,20 @@ services:
       DB: postgres12
       DB_PORT: 5432
       POSTGRES_USER: space
-      POSTGRES_PWD_FILE: /run/secrets/postgres_password_temporal
       POSTGRES_SEEDS: postgres
-      DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/development-sql.yaml
+      DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/docker.yaml
+    # temporalio/auto-setup reads POSTGRES_PWD only (no *_FILE support), so load
+    # the mounted secret in the entrypoint, as packages/run-spaceapp/templates/compose.yml does.
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - export POSTGRES_PWD="$$(cat /run/secrets/postgres_password_temporal)"; exec /etc/temporal/entrypoint.sh autosetup
     volumes:
       - ${temporalSecretPath}:/run/secrets/postgres_password_temporal:ro
     ports:
       - "127.0.0.1:${temporalPort}:7233"
     healthcheck:
-      test: ["CMD", "tctl", "--address", "127.0.0.1:7233", "cluster", "health"]
+      # Temporal binds the container IP (not 127.0.0.1); also wait for the default namespace.
+      test: ["CMD-SHELL", "temporal operator cluster health --address temporal:7233 >/dev/null && temporal operator namespace describe --namespace default --address temporal:7233 >/dev/null"]
       interval: 3s
       timeout: 5s
       retries: 40
@@ -734,6 +740,32 @@ export function buildDevStackChildEnv(config, secrets, baseEnv = process.env) {
     webOrigin,
     cliHostSocket
   };
+}
+
+/**
+ * Resolves the JavaScript entrypoint of a workspace dependency's CLI (e.g. tsx, vite, tsc) so
+ * the supervisor can run it with `process.execPath` directly. Going through `npx` leaves an
+ * npm wrapper as the supervised child, and signalling that wrapper orphans the real process.
+ */
+export function resolvePackageBin(fromDir, packageName, binName = packageName) {
+  const requireFrom = createRequire(path.join(fromDir, "package.json"));
+  const manifestPath = requireFrom.resolve(`${packageName}/package.json`);
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  const binRelative = typeof manifest.bin === "string" ? manifest.bin : manifest.bin?.[binName];
+  if (!binRelative) {
+    throw new Error(`Package "${packageName}" does not declare a "${binName}" bin.`);
+  }
+  return path.join(path.dirname(manifestPath), binRelative);
+}
+
+/**
+ * Returns the API process environment: the shared child env plus SPACE_SESSION_SECRET.
+ * apps/api reads the session secret only from SPACE_SESSION_SECRET (the production image's
+ * deploy/docker/core-entrypoint.sh loads it from SPACE_SESSION_SECRET_FILE), so the dev stack
+ * does the same for the API alone and keeps it out of cli-host, worker, and web.
+ */
+export function buildDevStackApiEnv(childEnv, secrets) {
+  return { ...childEnv, SPACE_SESSION_SECRET: secrets.sessionSecret };
 }
 
 /**
@@ -1279,31 +1311,64 @@ function extractSessionCookie(response) {
 /**
  * Verifies that the CLI terminal WebSocket endpoint accepts an authenticated upgrade.
  */
-async function verifyWebSocketAttach(wsUrl, origin, cookie) {
-  if (typeof WebSocket !== "function") return;
-  await new Promise((resolve, reject) => {
+/**
+ * Builds the CLI terminal WebSocket URL the web client uses (apps/web/src/live-api.ts
+ * cliTerminalWebSocketUrl) from the ticket returned by POST /api/panes/:id/cli/session.
+ */
+export function buildCliTerminalWebSocketUrl(origin, paneId, ticket) {
+  if (!ticket?.sessionId || !ticket?.token) {
+    throw new Error("CLI session response did not include a terminal WebSocket ticket.");
+  }
+  const params = new URLSearchParams({
+    sessionId: ticket.sessionId,
+    token: ticket.token,
+    initialCols: "120",
+    initialRows: "40"
+  });
+  const wsOrigin = origin.replace(/^http/, "ws");
+  return `${wsOrigin}/api/panes/${encodeURIComponent(paneId)}/cli/terminal?${params.toString()}`;
+}
+
+/**
+ * Returns the array from a paginated `{ data: [...] }` API list response.
+ */
+export function listResponseItems(body) {
+  return Array.isArray(body?.data) ? body.data : null;
+}
+
+/**
+ * Attaches to the CLI terminal WebSocket (as a browser tab would) and keeps the connection open
+ * so the pane host can attach the PTY. Resolves with the socket once the server reports "ready".
+ */
+function attachCliTerminal(wsUrl, origin, cookie) {
+  if (typeof WebSocket !== "function") {
+    throw new Error("A global WebSocket is required (Node >=22).");
+  }
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(wsUrl, { headers: { Cookie: cookie, Origin: origin } });
     const timeout = setTimeout(() => {
-      reject(new Error(`Timed out waiting for CLI terminal WebSocket handshake at ${wsUrl}`));
-    }, 15_000);
-    let ws;
-    try {
-      ws = new WebSocket(wsUrl, {
-        headers: {
-          Cookie: cookie,
-          Origin: origin
-        }
-      });
-    } catch {
-      ws = new WebSocket(wsUrl);
-    }
-    ws.addEventListener("open", () => {
-      clearTimeout(timeout);
       ws.close();
-      resolve();
+      reject(new Error("Timed out waiting for the CLI terminal WebSocket to become ready."));
+    }, 15_000);
+    ws.addEventListener("message", (event) => {
+      let message;
+      try {
+        message = JSON.parse(String(event.data));
+      } catch {
+        return;
+      }
+      if (message?.type === "ready") {
+        clearTimeout(timeout);
+        resolve(ws);
+      }
     });
     ws.addEventListener("error", () => {
       clearTimeout(timeout);
-      reject(new Error(`WebSocket connection failed at ${wsUrl}`));
+      reject(new Error("CLI terminal WebSocket connection failed."));
+    });
+    ws.addEventListener("close", (event) => {
+      clearTimeout(timeout);
+      reject(new Error(`CLI terminal WebSocket closed before ready (code ${event.code}).`));
     });
   });
 }
@@ -1393,18 +1458,26 @@ export async function runDevStackSmoke(config) {
   const { response: roomsRes, body: roomsBody } = await fetchJson(`${webOrigin}/api/rooms`, {
     headers: { Cookie: sessionCookie }
   });
-  if (roomsRes.status !== 200 || !Array.isArray(roomsBody?.rooms)) {
+  const rooms = listResponseItems(roomsBody);
+  if (roomsRes.status !== 200 || !rooms) {
     throw new Error(`GET /api/rooms failed (${roomsRes.status}): ${JSON.stringify(roomsBody)}`);
   }
   const gettingStartedRoom =
-    roomsBody.rooms.find((room) => room.id === starterRoomId) ??
-    roomsBody.rooms.find((room) => room.name === "Getting Started") ??
-    roomsBody.rooms[0];
+    rooms.find((room) => room.id === starterRoomId) ??
+    rooms.find((room) => room.name === "Getting Started") ??
+    rooms[0];
   if (!gettingStartedRoom) {
     throw new Error("Could not find the Getting Started room.");
   }
 
-  const panes = Array.isArray(gettingStartedRoom.panes) ? gettingStartedRoom.panes : [];
+  const { response: panesRes, body: panesBody } = await fetchJson(
+    `${webOrigin}/api/panes?roomId=${encodeURIComponent(gettingStartedRoom.id)}`,
+    { headers: { Cookie: sessionCookie } }
+  );
+  const panes = listResponseItems(panesBody);
+  if (panesRes.status !== 200 || !panes) {
+    throw new Error(`GET /api/panes failed (${panesRes.status}): ${JSON.stringify(panesBody)}`);
+  }
   const opencodePane =
     panes.find((pane) => pane.mode === "TERMINAL" && pane.terminalRuntimeId === "cli:opencode" && !pane.isClosed) ??
     panes.find((pane) => pane.mode === "TERMINAL" && !pane.isClosed);
@@ -1429,27 +1502,32 @@ export async function runDevStackSmoke(config) {
     );
   }
 
-  if (startBody.websocket?.path && startBody.websocket?.token) {
-    const wsUrl = `ws://127.0.0.1:${config.webPort}${startBody.websocket.path}?token=${encodeURIComponent(startBody.websocket.token)}`;
-    await verifyWebSocketAttach(wsUrl, webOrigin, sessionCookie);
-  }
+  const terminalSocket = await attachCliTerminal(
+    buildCliTerminalWebSocketUrl(webOrigin, opencodePane.id, startBody.websocket),
+    webOrigin,
+    sessionCookie
+  );
 
   let currentSession = startBody.session;
   const sessionDeadline = Date.now() + 30_000;
-  while (currentSession?.status !== "RUNNING" && Date.now() < sessionDeadline) {
-    await sleep(400);
-    const { response: pollRes, body: pollBody } = await fetchJson(
-      `${webOrigin}/api/panes/${encodeURIComponent(opencodePane.id)}/cli/session`,
-      { headers: { Cookie: sessionCookie } }
-    );
-    if (pollRes.status === 200 && pollBody?.session) {
-      currentSession = pollBody.session;
-      if (currentSession.status === "ERROR" || currentSession.status === "EXITED") {
-        throw new Error(
-          `OpenCode pane session entered ${currentSession.status}: ${currentSession.statusReason ?? "no reason"}`
-        );
+  try {
+    while (currentSession?.status !== "RUNNING" && Date.now() < sessionDeadline) {
+      await sleep(400);
+      const { response: pollRes, body: pollBody } = await fetchJson(
+        `${webOrigin}/api/panes/${encodeURIComponent(opencodePane.id)}/cli/session`,
+        { headers: { Cookie: sessionCookie } }
+      );
+      if (pollRes.status === 200 && pollBody?.session) {
+        currentSession = pollBody.session;
+        if (currentSession.status === "ERROR" || currentSession.status === "EXITED") {
+          throw new Error(
+            `OpenCode pane session entered ${currentSession.status}: ${currentSession.statusReason ?? "no reason"}`
+          );
+        }
       }
     }
+  } finally {
+    terminalSocket.close();
   }
 
   if (currentSession?.status !== "RUNNING") {
@@ -1553,7 +1631,6 @@ export async function upDevStack(config) {
   writeFileSync(composeFilePath, composeYaml, { encoding: "utf8", mode: 0o600 });
 
   const npmCmd = process.platform === "win32" ? "npm.cmd" : "npm";
-  const npxCmd = process.platform === "win32" ? "npx.cmd" : "npx";
 
   if (!config.skipBuild) {
     process.stdout.write("[dev:stack] Building workspace packages...\n");
@@ -1603,16 +1680,20 @@ export async function upDevStack(config) {
     },
     {
       name: "api",
-      command: npxCmd,
-      args: ["tsx", "watch", path.join(config.repoRoot, "apps", "api", "src", "server.ts")],
+      command: process.execPath,
+      args: [
+        resolvePackageBin(path.join(config.repoRoot, "apps", "api"), "tsx"),
+        "watch",
+        path.join(config.repoRoot, "apps", "api", "src", "server.ts")
+      ],
       cwd: config.repoRoot,
-      env: childEnv
+      env: buildDevStackApiEnv(childEnv, secrets)
     },
     {
       name: "web",
-      command: npxCmd,
+      command: process.execPath,
       args: [
-        "vite",
+        resolvePackageBin(path.join(config.repoRoot, "apps", "web"), "vite"),
         "--host",
         "127.0.0.1",
         "--port",
@@ -1627,9 +1708,9 @@ export async function upDevStack(config) {
   if (config.packageWatch) {
     serviceSpecs.unshift({
       name: "packages",
-      command: npxCmd,
+      command: process.execPath,
       args: [
-        "tsc",
+        resolvePackageBin(config.repoRoot, "typescript", "tsc"),
         "-b",
         "packages/contracts",
         "packages/icons",

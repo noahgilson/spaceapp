@@ -108,7 +108,7 @@ Verify readiness, claim owner setup over HTTP, and verify that the Getting
 Started OpenCode CLI pane reaches `RUNNING` without a browser TTY:
 
 ```sh
-npm run dev:stack:smoke
+npm run dev:stack -- smoke
 ```
 
 Sample readiness and smoke output:
