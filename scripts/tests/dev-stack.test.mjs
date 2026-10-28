@@ -240,6 +240,23 @@ test("resetDevStack refuses to delete an unmarked non-empty custom directory", a
   }
 });
 
+test("resetDevStack refuses to delete an unmarked .dev-stack-prefixed directory", async () => {
+  const scratchParent = mkdtempSync(path.join(os.tmpdir(), "spaceapp-prefixed-dir-"));
+  const prefixedDir = path.join(scratchParent, ".dev-stack-notes");
+  try {
+    mkdirSync(prefixedDir, { recursive: true });
+    writeFileSync(path.join(prefixedDir, "notes.txt"), "keep", "utf8");
+    const config = parseDevStackArgs(["reset", "--state-dir", prefixedDir], {}, defaultRepoRoot);
+    await assert.rejects(
+      () => resetDevStack(config, { removeDocker: false }),
+      /Refusing to delete non-empty directory/
+    );
+    assert.equal(existsSync(path.join(prefixedDir, "notes.txt")), true);
+  } finally {
+    rmSync(scratchParent, { recursive: true, force: true });
+  }
+});
+
 test("superviseChildProcesses stops sibling services and reports failure when a child exits unexpectedly", async () => {
   const fakeChildren = new Map();
   const fakeSpawn = (_cmd, _args, _opts) => {

@@ -1297,7 +1297,7 @@ export async function resetDevStack(config, { removeDocker = true } = {}) {
     }
     const entries = readdirSync(resolvedStateDir);
     const hasMarker = existsSync(path.join(resolvedStateDir, stateDirMarkerFile));
-    const isNamedDevStack = path.basename(resolvedStateDir).startsWith(".dev-stack");
+    const isNamedDevStack = path.basename(resolvedStateDir) === ".dev-stack";
     if (entries.length > 0 && !hasMarker && !isNamedDevStack) {
       throw new Error(
         `Refusing to delete non-empty directory "${resolvedStateDir}" without ${stateDirMarkerFile}.`
