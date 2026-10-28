@@ -882,8 +882,10 @@ export function superviseChildProcesses(serviceSpecs, {
   };
 
   let initialPackageWatchDone = false;
+  let restartInFlight = null;
+  let restartPending = false;
 
-  const restartPackageDependents = async () => {
+  const restartPackageDependentsOnce = async () => {
     for (const [name, entry] of children) {
       if (!entry.spec.restartOnPackageRebuild || shuttingDown || firstFailure) continue;
       entry.restarting = true;
@@ -907,6 +909,24 @@ export function superviseChildProcesses(serviceSpecs, {
       startService(entry.spec);
     }
     onPidsChanged?.(getPids());
+  };
+
+  // Serialize restarts: a rebuild that lands while a restart is running queues exactly one
+  // rerun instead of racing the in-flight restart (which could orphan an untracked child).
+  const restartPackageDependents = () => {
+    if (restartInFlight) {
+      restartPending = true;
+      return restartInFlight;
+    }
+    restartInFlight = (async () => {
+      do {
+        restartPending = false;
+        await restartPackageDependentsOnce();
+      } while (restartPending && !shuttingDown && !firstFailure);
+    })().finally(() => {
+      restartInFlight = null;
+    });
+    return restartInFlight;
   };
 
   /**
@@ -1105,7 +1125,8 @@ export function isRecordedDevStackProcess(
   {
     repoRoot = defaultRepoRoot,
     stateDir = "",
-    inspectCommand = readProcessCommand
+    inspectCommand = readProcessCommand,
+    isSupervisor = false
   } = {}
 ) {
   const commandLine = inspectCommand(pid);
@@ -1115,14 +1136,12 @@ export function isRecordedDevStackProcess(
   const normalizedCmd = commandLine.replaceAll("\\", "/");
   const normalizedRepo = repoRoot ? path.resolve(repoRoot).replaceAll("\\", "/") : "";
   const normalizedState = stateDir ? path.resolve(stateDir).replaceAll("\\", "/") : "";
+  // Children are spawned with absolute paths under repoRoot, so they must match the absolute
+  // checkout path. Only the supervisor may be launched as a relative `node scripts/dev-stack.mjs`.
   const markers = [
     normalizedRepo,
     normalizedState,
-    "scripts/dev-stack.mjs",
-    "packages/cli-host/dist/main.js",
-    "apps/worker/dist/worker.js",
-    "apps/api/src/server.ts",
-    "vite"
+    isSupervisor ? "scripts/dev-stack.mjs" : ""
   ].filter(Boolean);
   return markers.some((marker) => normalizedCmd.includes(marker));
 }
@@ -1152,8 +1171,12 @@ export async function terminateRecordedProcesses(
 
   const effectiveRepoRoot = recorded?.repoRoot || repoRoot;
   const rawPids = [];
-  if (Number.isInteger(recorded?.supervisorPid) && recorded.supervisorPid !== process.pid) {
-    rawPids.push(recorded.supervisorPid);
+  const supervisorPid =
+    Number.isInteger(recorded?.supervisorPid) && recorded.supervisorPid !== process.pid
+      ? recorded.supervisorPid
+      : null;
+  if (supervisorPid !== null) {
+    rawPids.push(supervisorPid);
   }
   if (recorded?.children && typeof recorded.children === "object") {
     for (const pid of Object.values(recorded.children)) {
@@ -1169,7 +1192,8 @@ export async function terminateRecordedProcesses(
       isRecordedDevStackProcess(pid, {
         repoRoot: effectiveRepoRoot,
         stateDir,
-        inspectCommand
+        inspectCommand,
+        isSupervisor: pid === supervisorPid
       })
   );
 

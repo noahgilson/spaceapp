@@ -107,10 +107,21 @@ jobs:
       - name: Owner setup and OpenCode pane reaches RUNNING
         run: npm run dev:stack -- smoke
 
+      - name: Show dev stack diagnostics
+        if: failure()
+        run: |
+          tail -n 200 "$DEV_STACK_LOG" || true
+          docker ps -a --filter label=com.docker.compose.project=spaceapp-dev || true
+          docker compose -p spaceapp-dev logs --tail 100 || true
+
+      # Always reset and check for leftovers, even after a failed readiness or smoke step.
+      # A failure in an earlier step still fails the job; these steps only add their own result.
       - name: Reset the stack
+        if: always()
         run: npm run dev:stack -- reset
 
       - name: Verify containers, volumes, and processes are gone
+        if: always()
         run: |
           project=com.docker.compose.project=spaceapp-dev
           for _ in $(seq 1 15); do
@@ -127,10 +138,3 @@ jobs:
           if [ -e .dev-stack ]; then echo ".dev-stack/ remains" >&2; status=1; fi
           [ "$status" -eq 0 ] && echo "No spaceapp-dev containers, volumes, networks, processes, or .dev-stack/ remain."
           exit "$status"
-
-      - name: Show dev stack diagnostics
-        if: failure()
-        run: |
-          tail -n 200 "$DEV_STACK_LOG" || true
-          docker ps -a --filter label=com.docker.compose.project=spaceapp-dev || true
-          docker compose -p spaceapp-dev logs --tail 100 || true

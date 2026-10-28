@@ -411,6 +411,99 @@ test("superviseChildProcesses restarts restartOnPackageRebuild services after in
   await supervisor.stopAll();
 });
 
+test("isRecordedDevStackProcess requires the absolute checkout path for children", () => {
+  const otherCheckout = path.join(os.tmpdir(), "other-spaceapp-checkout");
+  const commands = new Map([
+    [1, "node scripts/dev-stack.mjs"],
+    [2, `node ${path.join(otherCheckout, "node_modules", "vite", "bin", "vite.js")} --port 5173`],
+    [3, `node ${path.join(otherCheckout, "packages", "cli-host", "dist", "main.js")}`],
+    [4, `node ${path.join(otherCheckout, "apps", "worker", "dist", "worker.js")}`],
+    [5, "/usr/bin/invite-daemon"],
+    [6, `node ${path.join(defaultRepoRoot, "node_modules", "vite", "bin", "vite.js")} --port 5173`]
+  ]);
+  const check = (pid, extra = {}) =>
+    isRecordedDevStackProcess(pid, {
+      repoRoot: defaultRepoRoot,
+      inspectCommand: (p) => commands.get(p) ?? "",
+      ...extra
+    });
+
+  // The relative supervisor marker is honoured only for the recorded supervisor PID.
+  assert.equal(check(1, { isSupervisor: true }), true);
+  assert.equal(check(1), false);
+  // Generic "vite" and relative per-service paths from another checkout no longer match.
+  for (const pid of [2, 3, 4, 5]) {
+    assert.equal(check(pid), false, `pid ${pid} should not match`);
+    assert.equal(check(pid, { isSupervisor: true }), false, `pid ${pid} should not match as supervisor`);
+  }
+  // Children launched with absolute paths under this checkout still match.
+  assert.equal(check(6), true);
+});
+
+test("superviseChildProcesses serializes overlapping package rebuild restarts", async () => {
+  const spawned = [];
+  const fakeSpawn = (_cmd, args, _opts) => {
+    const proc = new EventEmitter();
+    proc.stdout = new PassThrough();
+    proc.stderr = new PassThrough();
+    proc.exitCode = null;
+    proc.signalCode = null;
+    proc.pid = 21000 + spawned.length + 1;
+    proc.kill = (signal = "SIGTERM") => {
+      if (proc.exitCode !== null || proc.signalCode !== null) return;
+      // Exit asynchronously so a second rebuild can land while the first restart waits.
+      setTimeout(() => {
+        proc.signalCode = signal;
+        proc.emit("exit", null, signal);
+      }, 30);
+    };
+    spawned.push({ arg0: args[0], proc });
+    return proc;
+  };
+
+  const specs = [
+    { name: "packages", command: "npx", args: ["tsc"], cwd: defaultRepoRoot, env: {} },
+    {
+      name: "cli-host",
+      command: "node",
+      args: ["main.js"],
+      cwd: defaultRepoRoot,
+      env: {},
+      restartOnPackageRebuild: true
+    }
+  ];
+
+  let updatedPids = null;
+  const supervisor = superviseChildProcesses(specs, {
+    spawnProcess: fakeSpawn,
+    stdout: new PassThrough(),
+    stderr: new PassThrough(),
+    onPidsChanged: (pids) => {
+      updatedPids = pids;
+    }
+  });
+
+  const pkgProc = spawned[0].proc;
+  pkgProc.stdout.write("Found 0 errors. Watching for file changes.\n");
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  // Three incremental rebuilds while the first restart is still waiting for the old child.
+  for (let i = 0; i < 3; i += 1) {
+    pkgProc.stdout.write("Found 0 errors. Watching for file changes.\n");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  await new Promise((resolve) => setTimeout(resolve, 200));
+
+  const hosts = spawned.filter((entry) => entry.arg0 === "main.js");
+  // Initial start + the in-flight restart + exactly one coalesced pending rerun.
+  assert.equal(hosts.length, 3);
+  const live = hosts.filter(({ proc }) => proc.exitCode === null && proc.signalCode === null);
+  assert.equal(live.length, 1);
+  assert.equal(updatedPids?.["cli-host"], live[0].proc.pid);
+  assert.equal(live[0].proc, hosts.at(-1).proc);
+
+  await supervisor.stopAll();
+});
+
 test("resolvePackageBin points supervised tools at their JS entrypoints instead of npx wrappers", () => {
   const tsxBin = resolvePackageBin(path.join(defaultRepoRoot, "apps", "api"), "tsx");
   const viteBin = resolvePackageBin(path.join(defaultRepoRoot, "apps", "web"), "vite");
